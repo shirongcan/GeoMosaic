@@ -1,0 +1,12 @@
+# GeoMosaic 依赖
+#
+# 本项目 GUI 使用 tkinter（Python 自带），核心依赖是 GDAL Python 绑定（osgeo）。
+#
+# Windows（推荐在虚拟环境中安装）：
+#   python -m venv .venv
+#   .\.venv\Scripts\python -m pip install -U pip
+#   .\.venv\Scripts\python -m pip install .\GDAL-3.10.1-cp312-cp312-win_amd64.whl
+#   .\.venv\Scripts\python -m pip install pyproj
+#   .\.venv\Scripts\python -m pip install numpy
+#
+# 说明：GDAL 在 Windows 上强烈建议用与你 Python 版本匹配的 wheel。
