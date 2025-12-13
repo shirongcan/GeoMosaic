@@ -67,6 +67,11 @@ class App(tk.Tk):
         self.suggest_lbl = tk.Label(zfrm, text="建议 Max Zoom：-", fg="#555")
         self.suggest_lbl.grid(row=0, column=4, sticky="w", padx=(14, 0))
 
+        self.keep_tmp_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(zfrm, text="保留中间文件(warped_3857.tif)", variable=self.keep_tmp_var).grid(
+            row=1, column=0, columnspan=5, sticky="w", pady=(4, 0)
+        )
+
         # Buttons
         bfrm = tk.Frame(self)
         bfrm.pack(fill=tk.X, **pad)
@@ -170,6 +175,19 @@ class App(tk.Tk):
                 tiles_url_template=tiles_tpl,
             )
             (out_dir / "index.html").write_text(build_leaflet_preview_html(cfg), encoding="utf-8")
+
+            # 默认清理中间文件，保持输出目录干净
+            if not bool(self.keep_tmp_var.get()):
+                try:
+                    info.warped_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+                try:
+                    cache_dir = info.warped_path.parent
+                    # 只在空目录时删除
+                    cache_dir.rmdir()
+                except Exception:
+                    pass
 
             self._log("完成。你可以打开输出目录里的 index.html 预览。")
             self._log_queue.put("__DONE__")

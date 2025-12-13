@@ -2,12 +2,59 @@ from __future__ import annotations
 
 import math
 import os
+import contextlib
+import io
+import logging
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _runtime_base_dir() -> Path:
+    # PyInstaller sets sys._MEIPASS. In onedir it points to the app folder.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        try:
+            return Path(meipass).resolve()
+        except Exception:
+            pass
+    return Path(sys.executable).resolve().parent
+
+
+def _preconfigure_dll_search_path_for_frozen() -> None:
+    """Make sure GDAL/PROJ dlls are discoverable in a frozen build."""
+    if not _is_frozen():
+        return
+
+    base = _runtime_base_dir()
+    dll_dirs = [
+        base,
+        base / "osgeo",
+    ]
+
+    # Prefer robust DLL search path on py>=3.8
+    for d in dll_dirs:
+        try:
+            if d.exists():
+                os.add_dll_directory(str(d))  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    # Also prepend PATH for libraries using legacy search.
+    existing = os.environ.get("PATH", "")
+    prefix = os.pathsep.join(str(d) for d in dll_dirs if d.exists())
+    if prefix and (prefix not in existing):
+        os.environ["PATH"] = prefix + os.pathsep + existing
+
+
+# Must run BEFORE importing osgeo in frozen builds
+_preconfigure_dll_search_path_for_frozen()
 
 try:
     from osgeo import gdal, osr  # type: ignore
@@ -184,7 +231,10 @@ def warp_to_web_mercator(
     ensure_gdal_available()
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    warped_path = out_dir / "warped_3857.tif"
+    # 避免把中间文件直接丢在输出根目录：统一放到缓存子目录
+    cache_dir = out_dir / "_geomosaic_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    warped_path = cache_dir / "warped_3857.tif"
 
     log("读取与校验 GeoTIFF...")
     validate_geotiff(src_path)
@@ -338,30 +388,96 @@ def generate_xyz_tiles(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = _detect_gdal2tiles_command(log)
     zoom_arg = f"{min_zoom}-{max_zoom}"
 
     # Make sure we do XYZ scheme and PNG tiles; disable built-in webviewer.
-    args = (
-        cmd
-        + [
-            "--profile=mercator",
-            f"--zoom={zoom_arg}",
-            "--xyz",
-            "--tiledriver=PNG",
-            "--webviewer=none",
-            "--resume",
-            "--exclude",
-            "--resampling=bilinear",
-            str(warped_path),
-            str(out_dir),
-        ]
-    )
+    argv = [
+        "gdal2tiles.py",
+        "--profile=mercator",
+        f"--zoom={zoom_arg}",
+        "--xyz",
+        "--tiledriver=PNG",
+        "--webviewer=none",
+        "--resume",
+        "--exclude",
+        "--resampling=bilinear",
+        str(warped_path),
+        str(out_dir),
+    ]
 
     log("开始生成 XYZ 瓦片...")
-    log("命令：" + " ".join(_quote_for_log(a) for a in args))
+    log("命令：python -m osgeo_utils.gdal2tiles " + " ".join(_quote_for_log(a) for a in argv[1:]))
 
-    _run_with_live_output(args, cwd=out_dir, log=log)
+    # In a packaged exe, sys.executable is not Python, so subprocess "python -m" is not viable.
+    # Even in normal mode, in-process invocation is more reliable (same env, same GDAL_DATA/PROJ_LIB).
+    _run_gdal2tiles_inprocess(argv=argv, log=log)
+
+
+class _LogStream(io.TextIOBase):
+    def __init__(self, log: LogFn) -> None:
+        super().__init__()
+        self._log = log
+        self._buf = ""
+
+    def write(self, s: str) -> int:  # type: ignore[override]
+        if not s:
+            return 0
+        self._buf += s.replace("\r\n", "\n").replace("\r", "\n")
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                self._log(line.rstrip())
+        return len(s)
+
+    def flush(self) -> None:  # type: ignore[override]
+        if self._buf.strip():
+            self._log(self._buf.rstrip())
+        self._buf = ""
+
+
+class _ForwardToLogHandler(logging.Handler):
+    def __init__(self, log: LogFn) -> None:
+        super().__init__()
+        self._log = log
+
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover
+        try:
+            msg = self.format(record)
+        except Exception:
+            msg = record.getMessage()
+        if msg.strip():
+            self._log(msg)
+
+
+def _run_gdal2tiles_inprocess(argv: list[str], log: LogFn) -> None:
+    try:
+        from osgeo_utils import gdal2tiles  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"无法导入 osgeo_utils.gdal2tiles：{e}") from e
+
+    # Forward logging from gdal2tiles module.
+    g2t_logger = logging.getLogger("gdal2tiles")
+    handler = _ForwardToLogHandler(log)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    old_level = g2t_logger.level
+    g2t_logger.addHandler(handler)
+    g2t_logger.setLevel(logging.INFO)
+
+    # Also capture stdout/stderr (progress bars / prints).
+    stream = _LogStream(log)
+    try:
+        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+            rc = int(gdal2tiles.main(argv, called_from_main=True))
+    finally:
+        try:
+            stream.flush()
+        except Exception:
+            pass
+        g2t_logger.removeHandler(handler)
+        g2t_logger.setLevel(old_level)
+
+    if rc != 0:
+        raise RuntimeError(f"gdal2tiles 执行失败，退出码={rc}")
 
 
 def guess_xyz_tiles_url_template(out_dir: Path) -> tuple[str, Path | None]:
