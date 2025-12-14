@@ -35,6 +35,7 @@ MANIFEST
 *.manifest
 *.spec
 !GeoMosaic.spec
+!GeoTiffTool.spec
 
 # Installer logs
 pip-log.txt

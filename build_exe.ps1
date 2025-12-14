@@ -31,3 +31,13 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "完成：dist\\GeoMosaic\\GeoMosaic.exe"
 
+Write-Host ""
+Write-Host "Building GeoTiffTool (onedir) ..."
+& $Python -m PyInstaller --noconfirm --clean ".\\GeoTiffTool.spec"
+if ($LASTEXITCODE -ne 0) {
+  throw "PyInstaller 失败，退出码=$LASTEXITCODE"
+}
+
+Write-Host ""
+Write-Host "完成：dist\\GeoTiffTool\\GeoTiffTool.exe"
+
